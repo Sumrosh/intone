@@ -1,0 +1,67 @@
+# Açık Sumrosh/intone deposunda .github/workflows/build.yml olarak durur (kaynağı: INTONE deposu mac/runtime/).
+# Elle çalıştırılır: Python ortamı ve FFmpeg paketlerini derler, denetler; "yayımla" seçilirse Release'e koyar.
+name: Paketler
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Release olarak yayımla"
+        type: boolean
+        default: false
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  python:
+    runs-on: macos-14   # macOS 14 makinesi: mlx'in macOS 14 paketleri seçilir (en düşük destek de o)
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./build_python.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python
+          path: dist/
+          compression-level: 0
+
+  ffmpeg:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derleme araçları
+        run: |
+          for tool in meson ninja pkg-config; do command -v $tool >/dev/null || brew install ${tool/pkg-config/pkgconf}; done
+      - run: ./build_ffmpeg.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg
+          path: dist/
+          compression-level: 0
+
+  release:
+    needs: [python, ffmpeg]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: manifest.json ve Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="r${{ github.run_number }}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          jq -n --arg base "$BASE" --slurpfile py dist/python.json --slurpfile ff dist/ffmpeg.json '{
+            python: ($py[0] | {url: ($base + "/" + .file), sha256, size, version, requirements_sha256}),
+            ffmpeg: ($ff[0] | {url: ($base + "/" + .file), sha256, size, version})}' > dist/manifest.json
+          cat dist/manifest.json
+          gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "INTONE çalışma paketleri $TAG" \
+            --notes "INTONE uygulamasının ilk açılışta indirdiği Python ortamı ve FFmpeg. manifest.json, INTONE deposundaki mac/runtime/manifest.json'a kopyalanır." \
+            dist/*.tar.gz dist/manifest.json
